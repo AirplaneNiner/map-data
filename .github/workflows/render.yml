@@ -1,0 +1,37 @@
+on:
+  workflow_dispatch:
+  push:
+
+permissions:
+  contents: write
+
+env:
+  LOG: INFO
+
+concurrency:
+  group: ${{ github.workflow }}
+  cancel-in-progress: true
+
+jobs:
+  update:
+    runs-on: macos-latest
+
+    steps:
+      - uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8 # v6.0.1
+      - uses: actions/setup-python@83679a892e2d95755f2dac6acb0bfd1e9ac5d548 # v6.1.0
+        with:
+          python-version: '3.14' 
+      - uses: baptiste0928/cargo-install@b687c656bda5733207e629b50a22bf68974a0305 # v3.3.2
+        with:
+          crate: resvg
+      - uses: baptiste0928/cargo-install@b687c656bda5733207e629b50a22bf68974a0305 # v3.3.2
+        with:
+          crate: usvg
+      - run: brew install geos
+      - run: pip install -Ur requirements.txt
+      - run: python render.py
+      - run: echo "message=update @ $(date +%Y%m%dT%H:%M:%S%Z)" >> "$GITHUB_ENV"
+      - uses: EndBug/add-and-commit@a94899bca583c204427a224a7af87c02f9b325d5 # v9.1.4
+        with:
+          default_author: github_actions
+          message: ${{ env.message }}

@@ -1,85 +1,55 @@
-import gc
-import json
+import io
+import os
 from argparse import ArgumentParser
-from copy import deepcopy
 from glob import glob
 from pathlib import Path
 
-import psutil
-import ray
-import renderer
-from renderer.tools import components
+import PIL.Image
+from tile_renderer.render_tiles import render_tiles
+from tile_renderer.coord import Coord
+from tile_renderer.pla2 import Pla2File
+# noinspection PyProtectedMember
+from tile_renderer.skin import Skin
 
-import sort_output
-
-
-def read_file(path) -> dict:  # extract from JSON as dict
-    with open(path, "r", encoding="utf-8") as f:
-        data = json.load(f)
-        return data
-
-def get_batch(ns: list[str]) -> int:
-    with open("batchprogress.json", "r") as f:
-        data = json.load(f)
-        return data.get(','.join(ns), -1)
-
-def set_batch(ns: str, batch: int):
-    with open("batchprogress.json", "r+") as f:
-        data = json.load(f)
-        if batch != -1:
-            data[','.join(ns)] = batch
-        else:
-            del data[','.join(ns)]
-        f.seek(0)
-        f.truncate()
-        json.dump(data, f, indent=2)
-
+from rich.traceback import install
+install(show_locals=True)
 
 def main():
-    all_node_json = {}
-    all_comps_json = {}
-    for node_file in glob("nodes/*"):
-        all_node_json.update(read_file(node_file))
-    for comp_file in glob("comps/*"):
-        all_comps_json.update(read_file(comp_file))
-
     parser = ArgumentParser()
-    parser.add_argument("-n", '--namespaces', nargs="+", default=[])
+    parser.add_argument("-n", "--namespaces", nargs="+", default=[])
+    parser.add_argument("-z", "--zooms", nargs="+", type=int, default=[])
     args = parser.parse_args()
 
+    renders = []
     if args.namespaces:
-        rendered_node_json = {}
-        rendered_comps_json = {}
         for ns in args.namespaces:
-            rendered_node_json.update(read_file(f"nodes/{ns}.nodes.pla"))
-            rendered_comps_json.update(read_file(f"comps/{ns}.comps.pla"))
+            renders.extend(Pla2File.from_file(Path(f"files/{ns}.pla2.msgpack")).components)
     else:
-        rendered_node_json = all_node_json
-        rendered_comps_json = all_comps_json
-
-    all_nodes = renderer.NodeList(all_node_json)
-    all_comps = renderer.ComponentList(all_comps_json, all_node_json)
-    rendered_nodes = renderer.NodeList(rendered_node_json)
-    rendered_comps = renderer.ComponentList(rendered_comps_json, rendered_node_json)
+        for file in glob("files/*"):
+            renders.extend(Pla2File.from_file(Path(file)).components)
+    renders = list({(c.namespace, c.id): c for c in renders}.values())
 
     print(f"Rendering {', '.join(args.namespaces) or 'everything'}")
 
-    tiles = components.rendered_in(rendered_comps, rendered_nodes, 0, 9, 32)
-    print(f"{len(tiles)} tiles to render")
+    for zoom in args.zooms or (0, 1, 2, 3, 4, 5, 6, 7, 8, 9):
+        for tile, b in render_tiles(
+            components=renders,
+            skin=Skin.default(),
+            zoom=zoom,
+            max_zoom_range=32,
+            tile_size=256,
+            offset=Coord(-0.5, -32),
+            processes=os.cpu_count() + 1,
+            chunk_size=16,
+        ).items():
+            path = Path(__file__).parent / "tiles" / str(9 - tile.z) / str(tile.x) / (str(tile.y) + ".webp")
+            path.parent.mkdir(exist_ok=True, parents=True)
+            path.write_bytes(b)
+            try:
+                PIL.Image.open(io.BytesIO(b)).save(path)
+            except PIL.UnidentifiedImageError as e:
+                raise ValueError(b) from e
 
-    last_batch = get_batch(args.namespaces)
 
-    for i, batch in enumerate(tiles[x:x + 1000] for x in range(0, len(tiles), 1000)):
-        if i <= last_batch: continue
-        print(f"Batch {i} of {int(len(tiles) // 1000)}")
-        renderer.render(deepcopy(all_comps), deepcopy(all_nodes), renderer.ZoomParams(0, 9, 32),
-                        save_dir=Path("./tiles"), offset=renderer.Coord(0, 32),
-                        tiles=batch, use_ray=True, processes=psutil.cpu_count()//2)
-
-        sort_output.main()
-        ray.shutdown()
-        gc.collect()
-        set_batch(args.namespaces, i)
-    set_batch(args.namespaces, -1)
-
-if __name__ == "__main__": main()
+if __name__ == "__main__":
+    main()
